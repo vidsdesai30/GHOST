@@ -2,49 +2,65 @@
 
 ## Status
 
-Prompt 4 final validation. This document describes the runnable research prototype, not a production security service.
+GHOST is a frontend-only, local research demonstration. The browser runs deterministic synthetic fixtures and detection logic without FastAPI, Python, SQLite, network requests, or hosted inference.
 
-## Components and flow
+## Components and state flow
 
-The React/Vite frontend presents a graph-first investigation workspace with live API state, overview, graph, timeline, predictions, investigations, scenarios/tests, and security/audit views. The FastAPI backend validates normalized events with Pydantic, persists event IDs and metadata in SQLite, serves deterministic synthetic fixtures, and runs a pure sequence detector that produces predictions and evidence graphs.
+```text
+scenario fixtures -> localResearch.events()
+                  -> deterministic normalization
+                  -> stage comparison and ranking
+                  -> DetectionResult
+                  -> shared React state
+                  -> graph / timeline / predictions / investigation views
+```
 
-`fixture or POST /api/events -> Pydantic validation -> idempotent SQLite insert -> detection rules -> predictions/evidence graph -> API`
+The React/Vite/TypeScript application keeps the active scenario, event list, latest detection result, selected graph node, selected prediction, and timeline filter in `Dashboard.tsx`. Scenario changes reset the relevant state and recompute the same result from the selected fixture.
 
-## Data model
+## Frontend modules
 
-`SecurityEvent` contains `event_id`, `timestamp`, `event_type`, `host`, `process`, `user_account`, `source`, `destination`, arbitrary structured `attributes`, `scenario_id`, and `ingestion` metadata (`received_at`, source batch, optional sequence number, duplicate/delayed flags). Scenario, investigation, prediction, and evidence Pydantic models establish contracts for subsequent prompts. SQLite currently stores normalized event rows and JSON for structured fields.
+- `frontend/src/api.ts` contains the typed event, scenario, graph, prediction, and detection contracts; deterministic fixtures; and the `localResearch` engine.
+- `frontend/src/Dashboard.tsx` renders the seven investigation views and shared controls.
+- `frontend/src/styles.css` provides the TRACE LAB visual system, graph treatments, responsive layout, focus states, and reduced-motion behavior.
+- `frontend/src/App.tsx` exposes the dashboard entry point.
 
-Duplicate events are rejected by the event ID primary key and reported as idempotent duplicates. The detector also deduplicates request batches before matching. Timestamp and ingestion time are separate: arrival after event time is marked delayed, and arrival order that conflicts with event timestamps is marked out of order. Matching uses event timestamps and deterministic event-ID tie breaks.
+## Synthetic fixtures
 
-## Detection and prediction boundary
+Two deterministic scenarios are included:
 
-The current rule `scenario-office-macro` expects `process_start -> network_connection -> script_execution -> credential_access_attempt -> credential_dump`. It reports observed and missing stages, but missing telemetry is not treated as proof that an action did not occur. Fewer than two observed stages yields `insufficient_evidence` and no prediction. Deterministic weights rank `credential_dump` at `0.90` and `persistence_setup` at `0.38`; confidence is a transparent heuristic, not a calibrated probability.
+- `scenario-office-macro`: `process_start -> network_connection -> script_execution -> credential_access_attempt -> credential_dump`, with four supplied events and a missing final stage.
+- `scenario-build-runner`: `process_start -> script_execution -> network_connection -> persistence_setup`, with three supplied events and a missing final stage.
 
-Observed event nodes are created only from supplied events. Inferred ordered-sequence edges reference supporting event IDs. Predicted actions use separate `predicted_action` nodes and `supports_prediction` edges; they are never serialized as observed activity.
+Fixtures use documentation-safe values such as synthetic hostnames, reserved IP ranges, and synthetic process metadata. They do not collect credentials, execute attacks, or ingest real telemetry.
 
-## API contracts
+## Detection and evidence boundary
 
-- `GET /api/health`: liveness response.
-- `GET /api/status`: prototype status, SQLite backend, stored event count.
-- `GET /api/events?scenario_id=...`: normalized synthetic events.
-- `GET /api/scenarios`: available synthetic scenario definitions.
-- `GET /api/scenarios/{scenario_id}/demo-events`: deterministic demo events.
-- `POST /api/events`: validates and idempotently stores one event; returns `accepted` and `duplicate`.
-- `POST /api/detection`: validates an event batch and returns detection, predictions, and graph data.
-- `GET /api/predictions/{scenario_id}`: returns ranked demo predictions.
-- `GET /api/graph/{scenario_id}`: returns the demo detection graph response.
-- `GET /api/predictions/next-action`: compatibility route for the office-macro demo.
+The engine:
 
-The frontend uses typed contracts in `frontend/src/api.ts`. Scenario loading calls demo-events and graph endpoints together; the Scenarios view calls `POST /api/detection` explicitly. Loading, empty, error, and success states are represented in the dashboard. Backend failures are shown as unavailable; the UI does not fabricate successful results.
+1. Deduplicates event IDs for matching and records duplicate IDs.
+2. Detects timestamp order conflicts and delayed arrivals by comparing event and ingestion times.
+3. Orders unique events by event timestamp and event ID.
+4. Matches known event types against the selected scenario stages.
+5. Abstains when fewer than two stages are observed or when the sequence is complete.
+6. Ranks missing next-action candidates with transparent deterministic weights.
+7. Builds observed-event nodes, inferred ordered-sequence edges, predicted-action nodes, and evidence-linked prediction edges.
 
-The frontend defaults to `http://localhost:8000`. FastAPI defaults to allowing both `http://localhost:5173` and `http://127.0.0.1:5173` through `GHOST_FRONTEND_ORIGINS`, because both are common local Vite URLs. The verified backend command is `py -m uvicorn backend.app:app --host 127.0.0.1 --port 8000` from the repository root.
+Observed nodes represent supplied fixture events. Inferred edges represent relationships derived from their order. Predicted nodes represent possible next actions only; missing telemetry is not proof that the action occurred. Confidence is a heuristic score, not a calibrated probability.
 
-## Trust boundaries and security decisions
+## Visualization components
 
-The browser-to-local-API boundary is CORS-limited to the configured local frontend origin. No authentication is present because this is a single-user local prototype; that is a documented gap, not an implemented control. Inputs use typed validation, request bodies are capped at 1 MB, dynamic command execution is absent, CORS does not allow arbitrary origins, and error responses avoid diagnostic internals. Only synthetic data belongs in this project. SQLite files and `.env` files are ignored.
+- **Overview:** active fixture metrics, sequence status, graph preview, top hypothesis, and timeline.
+- **Attack Graph:** selectable observed and predicted nodes, inferred directional edges, legend, and node inspector.
+- **Event Timeline:** event time versus ingestion time with all/delayed filters.
+- **Predictions:** ranked hypotheses, heuristic confidence, reasoning, supporting IDs, stages, and alternatives.
+- **Investigations:** session-only evidence inspection for the selected hypothesis.
+- **Scenarios & Tests:** deterministic replay and reset controls.
+- **Security & Audit:** explicit frontend security posture and missing production controls.
 
-## Limitations and future production architecture
+No view claims server-side persistence. Browser state is the only investigation state.
 
-There is no authentication, authorization, tenant isolation, retention policy, durable migration system, rate limiting, event signature verification, encryption at rest, structured audit log, or production observability. A production architecture would place an authenticated ingestion gateway in front of a durable event bus, schema registry, tenant-aware storage, immutable evidence store, detection workers, model registry, human review workflow, and centralized monitoring. Prediction would require offline evaluation, confidence calibration, adversarial testing, and explicit analyst approval.
+## Design and trust boundaries
 
-Final validation used the live browser at `http://127.0.0.1:5173`: overview data loaded from the API; graph node selection exposed prediction boundaries and supporting IDs; timeline showed event and ingestion order; predictions showed confidence, stages, missing stages, and alternatives; investigations showed linked evidence; Scenarios & Tests ran detection; Security & Audit disclosed missing controls. Browser automation is not part of the repository test suite.
+The interface uses a near-black charcoal palette, green observed evidence, cyan inferred relationships, amber predicted hypotheses, technical labels, and responsive accessible controls. The visual language is explanatory rather than an assertion of live monitoring.
+
+Because the application is frontend-only, it provides no authentication, authorization, tenant isolation, secure ingestion boundary, audit log, encrypted storage, or production telemetry protection. It must remain a synthetic-data demonstration unless a separately designed service supplies those controls.
